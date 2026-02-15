@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+.env
+app/__pycache__/
+data/uploads/*
+data/rag.sqlite3
+!data/uploads/.gitkeep
