@@ -56,9 +56,15 @@ def retrieve(
     if not chunks:
         return []
 
+    # Hybrid retrieval:
+    # - Prefer vectors when available
+    # - Fill remaining slots with BM25 (and also cover chunks without embeddings)
+    out: list[RetrievedChunk] = []
+    seen: set[str] = set()
+
     if query_embedding is not None:
         emb_map = _fetch_embeddings(conn, [r["chunk_id"] for r in chunks])
-        scored: list[RetrievedChunk] = []
+        v_scored: list[RetrievedChunk] = []
         for r in chunks:
             item = emb_map.get(r["chunk_id"])
             if not item:
@@ -66,7 +72,7 @@ def retrieve(
             dim, blob = item
             vec = from_blob(blob, dim)
             score = cosine_similarity(query_embedding, vec)
-            scored.append(
+            v_scored.append(
                 RetrievedChunk(
                     chunk_id=r["chunk_id"],
                     file_id=r["file_id"],
@@ -76,26 +82,35 @@ def retrieve(
                     score=score,
                 )
             )
-        scored.sort(key=lambda x: x.score, reverse=True)
-        return scored[:top_k]
+        v_scored.sort(key=lambda x: x.score, reverse=True)
+        for item in v_scored[:top_k]:
+            out.append(item)
+            seen.add(item.chunk_id)
 
-    # Fallback lexical retrieval (BM25)
-    docs = [r["text"] for r in chunks]
-    index = BM25Index.build(docs)
-    scored = []
-    for i, r in enumerate(chunks):
-        score = index.score(query, i)
-        if score <= 0:
-            continue
-        scored.append(
-            RetrievedChunk(
-                chunk_id=r["chunk_id"],
-                file_id=r["file_id"],
-                file_name=r["file_name"],
-                page=r["page"],
-                text=r["text"],
-                score=score,
+    if len(out) < top_k:
+        docs = [r["text"] for r in chunks]
+        index = BM25Index.build(docs)
+        bm_scored: list[RetrievedChunk] = []
+        for i, r in enumerate(chunks):
+            score = index.score(query, i)
+            if score <= 0:
+                continue
+            bm_scored.append(
+                RetrievedChunk(
+                    chunk_id=r["chunk_id"],
+                    file_id=r["file_id"],
+                    file_name=r["file_name"],
+                    page=r["page"],
+                    text=r["text"],
+                    score=score,
+                )
             )
-        )
-    scored.sort(key=lambda x: x.score, reverse=True)
-    return scored[:top_k]
+        bm_scored.sort(key=lambda x: x.score, reverse=True)
+        for item in bm_scored:
+            if item.chunk_id in seen:
+                continue
+            out.append(item)
+            if len(out) >= top_k:
+                break
+
+    return out[:top_k]

@@ -6,6 +6,7 @@ from pathlib import Path
 
 SCHEMA_SQL = """
 PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS messages (
   session_id TEXT NOT NULL,
   role TEXT NOT NULL,
   content TEXT NOT NULL,
+  metadata TEXT,
   created_at TEXT NOT NULL,
   FOREIGN KEY (session_id) REFERENCES sessions(id)
 );
@@ -58,11 +60,20 @@ CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id);
 
 def connect(db_path: Path) -> sqlite3.Connection:
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys=ON;")
     return conn
 
 
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA_SQL)
+    _migrate(conn)
     conn.commit()
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    # Additive migrations only.
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    if "metadata" not in cols:
+        conn.execute("ALTER TABLE messages ADD COLUMN metadata TEXT;")

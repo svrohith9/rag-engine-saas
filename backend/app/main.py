@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.params import Depends
 from pydantic import BaseModel
 
 from app import db
@@ -25,9 +28,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-conn = db.connect(settings.db_path)
-db.init_db(conn)
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
+
+@contextmanager
+def get_conn():
+    conn = db.connect(settings.db_path)
+    try:
+        yield conn
+    finally:
+        conn.close()
+
+
+def conn_dep():
+    with get_conn() as conn:
+        yield conn
+
+
+@app.on_event("startup")
+def _startup() -> None:
+    with get_conn() as conn:
+        db.init_db(conn)
 
 
 def _now_iso() -> str:
@@ -74,7 +94,12 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict:
-    return {"ok": True}
+    return {
+        "ok": True,
+        "provider": settings.llm_provider,
+        "model": settings.gemini_model,
+        "embed_model": settings.gemini_embed_model,
+    }
 
 
 @app.get("/api/models")
@@ -94,7 +119,7 @@ def create_session() -> CreateSessionResponse:
 
 
 @app.get("/api/sessions/{session_id}/files", response_model=list[FileInfo])
-def list_files(session_id: str) -> list[FileInfo]:
+def list_files(session_id: str, conn=Depends(conn_dep)) -> list[FileInfo]:
     rows = conn.execute(
         "SELECT id, name, mime, size_bytes, created_at FROM files WHERE session_id=? ORDER BY created_at DESC",
         (session_id,),
@@ -106,6 +131,7 @@ def list_files(session_id: str) -> list[FileInfo]:
 async def upload_files(
     session_id: str,
     files: List[UploadFile] = File(...),
+    conn=Depends(conn_dep),
 ) -> UploadResponse:
     ensure_session(conn, session_id)
 
@@ -129,16 +155,78 @@ async def upload_files(
 
 
 @app.get("/api/sessions/{session_id}/messages")
-def list_messages(session_id: str) -> list[dict]:
+def list_messages(session_id: str, conn=Depends(conn_dep)) -> list[dict]:
     rows = conn.execute(
-        "SELECT id, role, content, created_at FROM messages WHERE session_id=? ORDER BY created_at ASC",
+        "SELECT id, role, content, metadata, created_at FROM messages WHERE session_id=? ORDER BY created_at ASC",
         (session_id,),
     ).fetchall()
-    return [dict(r) for r in rows]
+    out = []
+    for r in rows:
+        item = dict(r)
+        if item.get("metadata"):
+            try:
+                item["metadata"] = json.loads(item["metadata"])
+            except Exception:
+                item["metadata"] = None
+        out.append(item)
+    return out
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str, conn=Depends(conn_dep)) -> dict:
+    # Delete DB rows first, then best-effort delete files on disk.
+    file_rows = conn.execute("SELECT path FROM files WHERE session_id=?", (session_id,)).fetchall()
+    conn.execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id IN (SELECT id FROM files WHERE session_id=?))", (session_id,))
+    conn.execute("DELETE FROM chunks WHERE file_id IN (SELECT id FROM files WHERE session_id=?)", (session_id,))
+    conn.execute("DELETE FROM files WHERE session_id=?", (session_id,))
+    conn.execute("DELETE FROM messages WHERE session_id=?", (session_id,))
+    conn.execute("DELETE FROM sessions WHERE id=?", (session_id,))
+    conn.commit()
+
+    for r in file_rows:
+        try:
+            import os
+            os.remove(r["path"])
+        except Exception:
+            pass
+    # Best-effort remove session directory if empty
+    try:
+        session_dir = settings.upload_dir / session_id
+        if session_dir.exists():
+            for p in session_dir.iterdir():
+                try:
+                    p.unlink()
+                except Exception:
+                    pass
+            session_dir.rmdir()
+    except Exception:
+        pass
+
+    return {"ok": True}
+
+
+@app.delete("/api/sessions/{session_id}/files/{file_id}")
+def delete_file(session_id: str, file_id: str, conn=Depends(conn_dep)) -> dict:
+    row = conn.execute("SELECT path FROM files WHERE id=? AND session_id=?", (file_id, session_id)).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    conn.execute("DELETE FROM embeddings WHERE chunk_id IN (SELECT id FROM chunks WHERE file_id=?)", (file_id,))
+    conn.execute("DELETE FROM chunks WHERE file_id=?", (file_id,))
+    conn.execute("DELETE FROM files WHERE id=? AND session_id=?", (file_id, session_id))
+    conn.commit()
+
+    try:
+        import os
+        os.remove(row["path"])
+    except Exception:
+        pass
+
+    return {"ok": True}
 
 
 @app.post("/api/sessions/{session_id}/chat", response_model=ChatResponse)
-def chat(session_id: str, payload: ChatRequest) -> ChatResponse:
+def chat(session_id: str, payload: ChatRequest, conn=Depends(conn_dep)) -> ChatResponse:
     if settings.llm_provider != "gemini":
         raise HTTPException(status_code=400, detail="Only Gemini provider is implemented")
     if not settings.gemini_api_key:
@@ -147,8 +235,8 @@ def chat(session_id: str, payload: ChatRequest) -> ChatResponse:
     ensure_session(conn, session_id)
 
     conn.execute(
-        "INSERT INTO messages(id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), session_id, "user", payload.message, _now_iso()),
+        "INSERT INTO messages(id, session_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), session_id, "user", payload.message, None, _now_iso()),
     )
     conn.commit()
 
@@ -213,9 +301,16 @@ def chat(session_id: str, payload: ChatRequest) -> ChatResponse:
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"LLM request failed: {exc}") from exc
 
+    assistant_metadata = json.dumps(
+        {
+            "citations": [c.model_dump() for c in citations],
+            "used_embeddings": used_embeddings,
+            "model": settings.gemini_model,
+        }
+    )
     conn.execute(
-        "INSERT INTO messages(id, session_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-        (str(uuid.uuid4()), session_id, "assistant", answer, _now_iso()),
+        "INSERT INTO messages(id, session_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (str(uuid.uuid4()), session_id, "assistant", answer, assistant_metadata, _now_iso()),
     )
     conn.commit()
 
