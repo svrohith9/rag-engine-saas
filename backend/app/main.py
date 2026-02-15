@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -19,9 +19,9 @@ settings = load_settings()
 app = FastAPI(title="RAG Engine SaaS")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_allow_origins,
     allow_credentials=True,
-    allow_methods=["*"] ,
+    allow_methods=["*"],
     allow_headers=["*"],
 )
 

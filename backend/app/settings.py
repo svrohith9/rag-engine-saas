@@ -12,6 +12,8 @@ class Settings:
     app_host: str
     app_port: int
 
+    cors_allow_origins: list[str]
+
     llm_provider: str
     gemini_api_key: str
     gemini_model: str
@@ -27,10 +29,16 @@ def load_settings() -> Settings:
 
     upload_dir = Path(os.getenv("UPLOAD_DIR", "./data/uploads")).expanduser()
     db_path = Path(os.getenv("DB_PATH", "./data/rag.sqlite3")).expanduser()
+    cors_allow_origins = [
+        o.strip()
+        for o in os.getenv("CORS_ALLOW_ORIGINS", "http://localhost:5173").split(",")
+        if o.strip()
+    ]
 
     return Settings(
         app_host=os.getenv("APP_HOST", "0.0.0.0"),
         app_port=int(os.getenv("APP_PORT", "8000")),
+        cors_allow_origins=cors_allow_origins,
         llm_provider=os.getenv("LLM_PROVIDER", "gemini").lower(),
         gemini_api_key=os.getenv("GEMINI_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-2.5-flash"),

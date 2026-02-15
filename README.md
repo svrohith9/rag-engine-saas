@@ -1,11 +1,16 @@
 # RAG Engine SaaS (Gemini)
 
-End-to-end RAG project:
-- Backend (FastAPI): upload files, chunk + index, semantic retrieval (Gemini embeddings when available), chat Q&A with citations
-- Frontend (React + Mantine): smooth UI for upload, document library, and chat
+Production-oriented RAG project:
+- Backend (FastAPI + SQLite): upload files, chunk + index, semantic retrieval (Gemini embeddings when available), chat Q&A with citations
+- Frontend (React + Mantine): session-based workspace, drag/drop upload, chat, and source cards
 
-## Backend
+## Architecture
+- Ingestion: extract -> chunk -> (optional) embed -> store
+- Retrieval: cosine similarity over stored embeddings; BM25 lexical fallback if embeddings unavailable
+- Generation: Gemini gets question + top-k sources and returns a grounded answer
 
+## Quick Start
+### 1) Backend
 ```bash
 cd backend
 python3.11 -m venv .venv
@@ -16,12 +21,15 @@ cp .env.example .env
 python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## Frontend
-
+### 2) Frontend
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-Open the frontend dev URL, set backend URL to `http://localhost:8000`.
+Then open the frontend dev URL and keep backend URL as `http://localhost:8000`.
+
+## Docs
+- Backend details: `backend/README.md`
+- Frontend details: `frontend/README.md`
