@@ -1,0 +1,32 @@
+name: Bug report
+description: Report a bug
+title: "bug: "
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      value: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / stack traces
+      render: shell
+  - type: input
+    id: env
+    attributes:
+      label: Environment
+      description: OS, Python version, Node version
