@@ -43,3 +43,14 @@ python -m uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 - `POST /api/sessions/{session_id}/files` (multipart) -> ingestion results
 - `POST /api/sessions/{session_id}/chat` -> `{ answer, citations, used_embeddings, model }`
 - `GET /api/models` -> Gemini model list for your key
+
+## Production hardening
+- Upload payload guard: max **10 MB** per file.
+- Chat validation guardrails:
+  - `message`: 1..4000 characters
+  - `top_k`: 1..20
+- Security response headers are set on all HTTP responses:
+  - `X-Content-Type-Options: nosniff`
+  - `X-Frame-Options: DENY`
+  - `Referrer-Policy: strict-origin-when-cross-origin`
+  - `Permissions-Policy: camera=(), microphone=(), geolocation=()`
