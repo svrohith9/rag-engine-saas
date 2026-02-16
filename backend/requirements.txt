@@ -1,8 +1,31 @@
+# Core
 fastapi==0.115.6
 uvicorn[standard]==0.32.1
 python-multipart==0.0.20
 pydantic==2.10.4
 python-dotenv==1.0.1
+
+# HTTP & Data
 requests==2.32.3
+sse-starlette==2.2.1
+
+# Document Processing
 pypdf==5.1.0
 python-docx==1.1.2
+beautifulsoup4==4.12.3
+lxml==5.3.0
+
+# Google Gemini
+google-generativeai==0.8.4
+
+# OpenAI
+openai==1.57.4
+
+# Anthropic
+anthropic==0.38.0
+
+# Vector Search (optional)
+numpy==1.26.4
+
+# Rate Limiting
+slowapi==0.1.9
