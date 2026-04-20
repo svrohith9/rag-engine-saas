@@ -1,7 +1,9 @@
 # Changelog
 
-All notable changes will be documented here.
+All notable changes to this project should be documented in this file.
 
-## Unreleased
-- Initial backend RAG pipeline (chunking, optional embeddings, retrieval, chat with citations)
-- React + Mantine UI for sessions, upload, chat, and sources
+## [Unreleased]
+
+### Changed
+- Standardized top-level docs structure (run/test/deploy/troubleshooting/API snippets).
+- Updated contribution guidelines with concrete validation steps.

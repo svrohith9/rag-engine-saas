@@ -2,31 +2,29 @@
 
 Thanks for contributing.
 
-## Project Principles
-- Prefer correctness and clarity over cleverness.
-- Keep the happy path fast; keep the failure mode obvious.
-- No secrets in git history (no API keys, tokens, `.env` files).
+## Local development
 
-## Local Development
-See:
-- `docs/development.md`
-- `backend/README.md`
-- `frontend/README.md`
+```bash
+# backend
+cd backend
+python3.11 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-## Pull Requests
-- Keep PRs small and focused.
-- Update docs for behavior changes.
-- Add or update tests where it makes sense.
+# frontend
+cd ../frontend
+npm install
+```
 
-### Checklist
-- [ ] I ran the backend locally and exercised the modified endpoints.
-- [ ] I ran the frontend locally and verified UI behavior.
-- [ ] I did not commit secrets (`.env`, keys, tokens).
-- [ ] I updated docs if needed.
+## Validation before PR
 
-## Commit Style
-- Use imperative present tense: "Add …", "Fix …", "Refactor …".
+- Backend: `pytest`
+- Frontend: `npm run build`
+- Docs updated when API/config changes
 
-## Code Style
-- Python: keep functions small, avoid global state, prefer explicit types for public APIs.
-- TS/React: keep components focused; move API and types to `src/lib/`.
+## PR checklist
+
+- [ ] Focused scope
+- [ ] Clear description + rationale
+- [ ] Validation output included
+- [ ] No secrets committed
