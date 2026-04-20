@@ -6,10 +6,11 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app import db
 from app.gemini_api import generate_content, list_models, embed_text
@@ -29,6 +30,17 @@ app.add_middleware(
 )
 
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
+MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+
+@app.middleware("http")
+async def add_security_headers(request: Request, call_next):
+    response: Response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    return response
 
 @contextmanager
 def get_conn():
@@ -72,9 +84,9 @@ class UploadResponse(BaseModel):
 
 
 class ChatRequest(BaseModel):
-    message: str
+    message: str = Field(min_length=1, max_length=4000)
     use_images: bool = True
-    top_k: int = 8
+    top_k: int = Field(default=8, ge=1, le=20)
 
 
 class Citation(BaseModel):
@@ -112,7 +124,7 @@ def api_models() -> dict:
 
 
 @app.post("/api/sessions", response_model=CreateSessionResponse)
-def create_session() -> CreateSessionResponse:
+def create_session(conn=Depends(conn_dep)) -> CreateSessionResponse:
     session_id = str(uuid.uuid4())
     ensure_session(conn, session_id)
     return CreateSessionResponse(session_id=session_id)
@@ -139,6 +151,8 @@ async def upload_files(
     for f in files:
         name = f.filename or f"upload-{uuid.uuid4()}"
         data = await f.read()
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"File '{name}' exceeds 10MB upload limit")
         results.append(
             ingest_file(
                 conn=conn,
