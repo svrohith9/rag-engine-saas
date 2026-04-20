@@ -4,10 +4,10 @@ import json
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import AsyncGenerator, List, Optional
 
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.params import Depends
 from pydantic import BaseModel, Field
@@ -17,10 +17,11 @@ from app.gemini_api import generate_content, list_models, embed_text
 from app.ingest import ingest_file, ensure_session
 from app.retrieval import retrieve
 from app.settings import load_settings
+from app.llm_providers import get_provider
 
 settings = load_settings()
 
-app = FastAPI(title="RAG Engine SaaS")
+app = FastAPI(title="RAG Engine SaaS", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins,
@@ -31,6 +32,9 @@ app.add_middleware(
 
 settings.upload_dir.mkdir(parents=True, exist_ok=True)
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+
+# Initialize the LLM provider once — driven by settings.llm_provider.
+llm_provider = get_provider(settings)
 
 
 @app.middleware("http")
@@ -87,6 +91,8 @@ class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     use_images: bool = True
     top_k: int = Field(default=8, ge=1, le=20)
+    temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    stream: bool = False
 
 
 class Citation(BaseModel):
@@ -241,9 +247,154 @@ def delete_file(session_id: str, file_id: str, conn=Depends(conn_dep)) -> dict:
 
 @app.post("/api/sessions/{session_id}/chat", response_model=ChatResponse)
 def chat(session_id: str, payload: ChatRequest, conn=Depends(conn_dep)) -> ChatResponse:
-    if settings.llm_provider != "gemini":
-        raise HTTPException(status_code=400, detail="Only Gemini provider is implemented")
-    if not settings.gemini_api_key:
+    """Non-streaming chat endpoint"""
+    
+    # Check if streaming requested
+    if payload.stream and settings.enable_streaming:
+        # Redirect to streaming endpoint
+        raise HTTPException(
+            status_code=400,
+            detail="Use /api/sessions/{session_id}/chat/stream for streaming"
+        )
+    
+    return _do_chat(session_id, payload, conn)
+
+
+@app.post("/api/sessions/{session_id}/chat/stream")
+def chat_stream(session_id: str, payload: ChatRequest) -> StreamingResponse:
+    """Streaming chat endpoint using Server-Sent Events"""
+    
+    if not settings.enable_streaming:
+        raise HTTPException(
+            status_code=501,
+            detail="Streaming is not enabled. Set ENABLE_STREAMING=true"
+        )
+    
+    async def event_generator():
+        try:
+            # Get connection for retrieval
+            with get_conn() as conn:
+                ensure_session(conn, session_id)
+                
+                # Store user message
+                conn.execute(
+                    "INSERT INTO messages(id, session_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), session_id, "user", payload.message, None, _now_iso()),
+                )
+                conn.commit()
+                
+                # Retrieve context
+                query_embedding = None
+                used_embeddings = False
+                
+                # Try to get embeddings
+                try:
+                    query_embedding = llm_provider.embed_text(payload.message)
+                    used_embeddings = True
+                except Exception:
+                    query_embedding = None
+                    used_embeddings = False
+                
+                retrieved = retrieve(conn, session_id, payload.message, query_embedding, top_k=payload.top_k)
+                
+                # Build context
+                context_blocks = []
+                citations = []
+                for r in retrieved:
+                    snippet = (r.text[:240] + "...") if len(r.text) > 240 else r.text
+                    citations.append({
+                        "chunk_id": r.chunk_id,
+                        "file_name": r.file_name,
+                        "page": r.page,
+                        "score": float(r.score),
+                        "snippet": snippet,
+                    })
+                    page_note = f" (page {r.page})" if r.page else ""
+                    context_blocks.append(f"SOURCE: {r.file_name}{page_note}\n{r.text}")
+                
+                context = "\n\n---\n\n".join(context_blocks)
+                
+                # Get images if needed
+                image_paths = []
+                if payload.use_images:
+                    row = conn.execute(
+                        "SELECT path FROM files WHERE session_id=? AND mime LIKE 'image/%' ORDER BY created_at DESC LIMIT 1",
+                        (session_id,),
+                    ).fetchone()
+                    if row:
+                        image_paths = [row["path"]]
+                
+                system_text = (
+                    "You are a RAG assistant. Answer using the provided sources. "
+                    "If the sources do not contain the answer, say you don't know. "
+                    "When you use a source, cite it by file name and page if present."
+                )
+                
+                user_text = f"Question: {payload.message}\n\nSources:\n{context}" if context else f"Question: {payload.message}"
+                
+                # Stream the response
+                full_answer = ""
+                
+                for chunk in llm_provider.generate_stream(
+                    system_text=system_text,
+                    user_text=user_text,
+                    temperature=payload.temperature,
+                ):
+                    if chunk.delta:
+                        full_answer += chunk.delta
+                        # Send chunk via SSE
+                        data = json.dumps({
+                            "delta": chunk.delta,
+                            "model": chunk.model,
+                        })
+                        yield f"data: {data}\n\n"
+                    
+                    if chunk.done:
+                        break
+                
+                # Store assistant message
+                assistant_metadata = json.dumps({
+                    "citations": citations,
+                    "used_embeddings": used_embeddings,
+                    "model": _get_current_model(),
+                })
+                conn.execute(
+                    "INSERT INTO messages(id, session_id, role, content, metadata, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                    (str(uuid.uuid4()), session_id, "assistant", full_answer, assistant_metadata, _now_iso()),
+                )
+                conn.commit()
+                
+                # Send final message with citations
+                final_data = json.dumps({
+                    "done": True,
+                    "citations": citations,
+                    "used_embeddings": used_embeddings,
+                    "model": _get_current_model(),
+                })
+                yield f"data: {final_data}\n\n"
+        
+        except Exception as e:
+            error_data = json.dumps({"error": str(e)})
+            yield f"data: {error_data}\n\n"
+    
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _do_chat(session_id: str, payload: ChatRequest, conn) -> ChatResponse:
+    """Execute the chat logic"""
+    
+    if settings.llm_provider not in ["gemini", "openai", "anthropic", "ollama"]:
+        raise HTTPException(status_code=400, detail=f"Provider {settings.llm_provider} not supported")
+    
+    if settings.llm_provider == "gemini" and not settings.gemini_api_key:
         raise HTTPException(status_code=400, detail="GEMINI_API_KEY not set")
 
     ensure_session(conn, session_id)
@@ -257,9 +408,9 @@ def chat(session_id: str, payload: ChatRequest, conn=Depends(conn_dep)) -> ChatR
     # Retrieve context
     query_embedding = None
     used_embeddings = False
-    if settings.gemini_api_key and settings.gemini_embed_model:
+    if settings.gemini_api_key or settings.openai_api_key:
         try:
-            query_embedding = embed_text(settings.gemini_api_key, settings.gemini_embed_model, payload.message)
+            query_embedding = llm_provider.embed_text(payload.message)
             used_embeddings = True
         except Exception:
             query_embedding = None
@@ -304,14 +455,15 @@ def chat(session_id: str, payload: ChatRequest, conn=Depends(conn_dep)) -> ChatR
     user_text = f"Question: {payload.message}\n\nSources:\n{context}" if context else f"Question: {payload.message}"
 
     try:
-        answer = generate_content(
-            api_key=settings.gemini_api_key,
-            model=settings.gemini_model,
+        response = llm_provider.generate(
+            api_key=getattr(settings, f"{settings.llm_provider}_api_key", None),
+            model=_get_current_model(),
             system_text=system_text,
             user_text=user_text,
             image_paths=image_paths,
-            temperature=0.2,
+            temperature=payload.temperature,
         )
+        answer = response.content
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"LLM request failed: {exc}") from exc
 
@@ -319,7 +471,7 @@ def chat(session_id: str, payload: ChatRequest, conn=Depends(conn_dep)) -> ChatR
         {
             "citations": [c.model_dump() for c in citations],
             "used_embeddings": used_embeddings,
-            "model": settings.gemini_model,
+            "model": _get_current_model(),
         }
     )
     conn.execute(
@@ -332,5 +484,5 @@ def chat(session_id: str, payload: ChatRequest, conn=Depends(conn_dep)) -> ChatR
         answer=answer,
         citations=citations,
         used_embeddings=used_embeddings,
-        model=settings.gemini_model,
+        model=_get_current_model(),
     )
